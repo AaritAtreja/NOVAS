@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>LEO Risk Map (Pro v2.2)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <style>
+    :root{
+      --bg:#0b1220; --panel:#0f172a; --text:#e7ecf3; --muted:#a2b0c0;
+      --accent:#3b82f6; --border:#1f2837; --pill:#111827;
+    }
+    html, body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #map { position:absolute; top:0; right:0; bottom:0; left:0; }
+    #panel { position:absolute; top:16px; left:16px; width:360px; z-index:1000; background:rgba(15,23,42,0.94); border:1px solid var(--border); border-radius:16px; box-shadow:0 14px 32px rgba(0,0,0,0.45); padding:16px; }
+    #panel h1 { margin:0 0 12px 0; font-size:28px; font-weight:800; }
+    .row{ margin-bottom:14px; }
+    label{ display:block; font-size:14px; color:var(--muted); margin-bottom:6px; }
+    input[type="range"]{ width:100%; }
+    input[type="number"], select { width:100%; height:38px; border-radius:10px; border:1px solid var(--border); background:#0c1425; color:var(--text); padding:6px 8px; }
+    .btn{ background:var(--accent); color:white; border:0; padding:10px 12px; border-radius:12px; cursor:pointer; font-size:16px; font-weight:700;}
+    .kpis{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-top:10px; }
+    .kpi{ background:var(--pill); border:1px solid var(--border); border-radius:12px; padding:10px; font-size:14px;}
+    .kpi .v{ font-size:18px; font-weight:800; }
+    .leaflet-top.leaflet-left { display:none; }
+    .leaflet-top.leaflet-right { margin-top: 12px; margin-right: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h1>LEO Risk Map</h1>
+    <div class="row">
+      <label>Altitude (km): <span id="altVal">550</span></label>
+      <input id="alt" type="range" min="350" max="900" step="10" value="550">
+    </div>
+    <div class="row">
+      <label>Inclination (deg): <span id="incVal">53</span></label>
+      <input id="inc" type="range" min="0" max="100" step="1" value="53">
+    </div>
+    <div class="row">
+      <label>Size bin (mm):</label>
+      <select id="sizeBin">
+        <option value="1-3">1–3</option>
+        <option value="3-10" selected>3–10</option>
+        <option value="10-20">10–20</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Effective cross-section (m²):</label>
+      <input id="area" type="number" min="0.01" step="0.1" value="1.0">
+    </div>
+    <div class="row">
+      <label>Time window (months):</label>
+      <input id="months" type="number" min="1" step="1" value="6">
+    </div>
+    <div class="row"><button id="recalc" class="btn">Recalculate Risk</button></div>
+    <div class="kpis">
+      <div class="kpi"><div>Flux (≥ size)</div><div id="fluxOut" class="v">—</div><div>m⁻²·yr⁻¹</div></div>
+      <div class="kpi"><div>P(≥1 impact)</div><div id="pOut" class="v">—</div><div>probability</div></div>
+      <div class="kpi"><div>Swath area</div><div id="swathOut" class="v">—</div><div>km² (drawn)</div></div>
+      <div class="kpi"><div>Density score</div><div id="densOut" class="v">—</div><div>Low / Med / High</div></div>
+    </div>
+    <div class="row" style="font-size:12px;color:#a2b0c0;">Draw a rectangle or polygon (top-right) to define a swath. It does not change the satellite cross-section.</div>
+  </div>
+
+  <script>
+    async function loadFlux(url){
+      const txt = await fetch(url).then(r=>r.text());
+      const lines = txt.trim().split(/\r?\n/);
+      const out = [];
+      for (let i=1;i<lines.length;i++){
+        const [alt,inc,smin,smax,flux] = lines[i].split(",");
+        out.push({ alt_km:+alt, incl_deg:+inc, size_min_mm:+smin, size_max_mm:+smax, flux_per_m2_per_year:+flux });
+      }
+      return out;
+    }
+    function lookupFlux(rows, alt_km, incl_deg, size_min, size_max){
+      let best=null, bestDist=Infinity;
+      for (const r of rows){
+        if (r.size_min_mm!==size_min || r.size_max_mm!==size_max) continue;
+        const d = Math.abs(r.alt_km - alt_km) + Math.abs(r.incl_deg - incl_deg);
+        if (d < bestDist){ best=r; bestDist=d; }
+      }
+      return best ? best.flux_per_m2_per_year : NaN;
+    }
+    function pImpact(F, A, months){ const years = months/12; const lambda = F*A*years; return 1 - Math.exp(-lambda); }
+
+    // Map init
+    const map = L.map('map', { zoomControl:false, worldCopyJump:true }).setView([0,0], 2);
+    L.control.zoom({ position:'topright' }).addTo(map);
+    const blueMarble = L.tileLayer(
+      "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg",
+      { attribution:"NASA GIBS", maxZoom:7, minZoom:1 }
+    ).addTo(map);
+    const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution:"© OpenStreetMap", maxZoom:19 });
+    blueMarble.on('tileerror', ()=>{ if(!map.hasLayer(osm)) osm.addTo(map); });
+
+    // Draw controls
+    const drawnItems = new L.FeatureGroup().addTo(map);
+    const drawControl = new L.Control.Draw({ position:"topright", draw:{ polygon:true, rectangle:true, circle:false, circlemarker:false, marker:false, polyline:false }, edit:{ featureGroup:drawnItems } });
+    map.addControl(drawControl);
+
+    // Animated ground-track marker
+    const satIcon = L.divIcon({ html:'<div style="width:10px;height:10px;border-radius:50%;background:#3b82f6;box-shadow:0 0 10px #3b82f6;"></div>', className:'' });
+    let satMarker = L.marker([0,-180], { icon:satIcon }).addTo(map);
+    let t=0; function animate(){ const inc=+document.getElementById('inc').value; t+=0.015; const lat=inc*Math.sin(t); let lon=(t*180/Math.PI)%360-180; satMarker.setLatLng([lat,lon]); requestAnimationFrame(animate);} animate();
+
+    // State
+    let FLUX_ROWS = []; let maxFluxByBin = {}; let swathAreaKm2 = 0;
+    function sizeKey(min,max){ return `${min}-${max}`; }
+    function parseSizeBin(v){ const [a,b]=v.split("-").map(Number); return {min:a,max:b}; }
+
+    async function init(){
+      FLUX_ROWS = await loadFlux("data/sample_ordem_flux_extended.csv");
+      for (const r of FLUX_ROWS){ const k=sizeKey(r.size_min_mm,r.size_max_mm); if(!maxFluxByBin[k] || r.flux_per_m2_per_year>maxFluxByBin[k]) maxFluxByBin[k]=r.flux_per_m2_per_year; }
+      updateLabels(); calculate();
+    }
+
+    const altEl=document.getElementById('alt'), incEl=document.getElementById('inc'), sizeEl=document.getElementById('sizeBin'), areaEl=document.getElementById('area'), monthsEl=document.getElementById('months');
+    const altVal=document.getElementById('altVal'), incVal=document.getElementById('incVal'), fluxOut=document.getElementById('fluxOut'), pOut=document.getElementById('pOut'), swathOut=document.getElementById('swathOut'), densOut=document.getElementById('densOut');
+
+    function updateLabels(){ altVal.textContent=altEl.value; incVal.textContent=incEl.value; }
+    altEl.addEventListener('input', ()=>{ updateLabels(); calculate(); });
+    incEl.addEventListener('input', ()=>{ updateLabels(); });
+    sizeEl.addEventListener('change', calculate);
+    document.getElementById('recalc').addEventListener('click', calculate);
+
+    function densityLabel(score){ if(score>=0.66) return "High"; if(score>=0.33) return "Med"; return "Low"; }
+
+    function calculate(){
+      const alt=+altEl.value, inc=+incEl.value, {min:sizeMin,max:sizeMax}=parseSizeBin(sizeEl.value), A=Math.max(0,+areaEl.value||0), months=Math.max(0,+monthsEl.value||0);
+      const F = lookupFlux(FLUX_ROWS, alt, inc, sizeMin, sizeMax);
+      if (isNaN(F)){ fluxOut.textContent="—"; pOut.textContent="—"; return; }
+      const P = pImpact(F, A, months);
+      fluxOut.textContent = F.toExponential(2);
+      pOut.textContent = (P*100).toFixed(4)+"%";
+      const key=sizeKey(sizeMin,sizeMax), maxF=maxFluxByBin[key]||F, fNorm=Math.min(1, F/maxF), areaNorm=Math.min(1, swathAreaKm2/5_000_000);
+      const score=0.6*fNorm+0.4*areaNorm;
+      swathOut.textContent = swathAreaKm2 ? swathAreaKm2.toLocaleString(undefined,{maximumFractionDigits:0}) : "—";
+      densOut.textContent = swathAreaKm2 ? densityLabel(score) : "—";
+    }
+
+    function updateSwathArea(){
+      let total=0;
+      drawnItems.eachLayer(l=>{ try{ total += turf.area(l.toGeoJSON()); } catch(e){} });
+      swathAreaKm2 = total/1_000_000;
+      calculate();
+    }
+    map.on(L.Draw.Event.CREATED, e=>{ drawnItems.addLayer(e.layer); updateSwathArea(); });
+    map.on(L.Draw.Event.EDITED, e=>{ updateSwathArea(); });
+    map.on(L.Draw.Event.DELETED, e=>{ updateSwathArea(); });
+
+    init();
+  </script>
+</body>
+</html>
