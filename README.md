@@ -1,6 +1,7 @@
 ## LINK TO APP: nova.impactfuture.us
 ## LINK TO DEMO: https://www.youtube.com/watch?v=2L8eVbk_0T0
-## LINK TO RISK MAP: https://novas-risk-map.vercel.app
+## LINK TO EXPLANATIONS OF APP: https://tinyurl.com/explainNOVAS
+## LINK TO DEMO RISK MAP: https://novas-risk-map.vercel.app
 
 ## NOVAS
 We present our submission for the 2025 NASA Space Apps Challenge: NOVAS
