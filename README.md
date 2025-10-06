@@ -1,3 +1,5 @@
+## LINK TO APP: nova.impactfuture.us
+## LINK TO DEMO: https://www.youtube.com/watch?v=2L8eVbk_0T0
 
 ## NOVAS
 We present our submission for the 2025 NASA Space Apps Challenge: NOVAS
